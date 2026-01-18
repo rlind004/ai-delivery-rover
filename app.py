@@ -145,7 +145,8 @@ def clean_cost_grid(costs):
                     corrections += 1
     return cleaned
 
-def scan_terrain(model, image_file, scan_step=16):
+@st.cache_data(show_spinner="Analyzing Map Layers...")
+def scan_terrain(_model, image_file, scan_step=16):
     image = Image.open(image_file).convert('RGB')
     w, h = image.size
     cols, rows = w // scan_step, h // scan_step
@@ -161,30 +162,41 @@ def scan_terrain(model, image_file, scan_step=16):
     progress_bar = st.progress(0)
     status_text = st.empty()
     
+    # Collect all tiles and their positions
+    tiles = []
+    positions = []
+    for r in range(rows):
+        for c in range(cols):
+            cy, cx = r * scan_step + scan_step//2, c * scan_step + scan_step//2
+            crop_size = 32
+            left = max(0, cx - crop_size)
+            top = max(0, cy - crop_size)
+            right = min(w, cx + crop_size)
+            bottom = min(h, cy + crop_size)
+            tile = image.crop((left, top, right, bottom))
+            tiles.append(transform(tile))
+            positions.append((r, c))
+
+    # Process tiles in batches
+    BATCH_SIZE = 64
+    total_tiles = len(tiles)
+    
     with torch.no_grad():
-        for r in range(rows):
-            # Update progress every row
-            progress_bar.progress(int((r / rows) * 100))
-            status_text.text(f"Scanning row {r+1}/{rows}...")
+        for i in range(0, total_tiles, BATCH_SIZE):
+            # Update progress
+            progress_bar.progress(min((i + BATCH_SIZE) / total_tiles, 1.0))
+            status_text.text(f"Processing batch {(i // BATCH_SIZE) + 1}...")
             
-            for c in range(cols):
-                cy, cx = r * scan_step + scan_step//2, c * scan_step + scan_step//2
-                crop_size = 32
-                left = max(0, cx - crop_size)
-                top = max(0, cy - crop_size)
-                right = min(w, cx + crop_size)
-                bottom = min(h, cy + crop_size)
+            batch_tiles = torch.stack(tiles[i:i+BATCH_SIZE]).to(device)
+            outputs = _model(batch_tiles)
+            probs = torch.nn.functional.softmax(outputs, dim=1)
+            top2_prob, top2_idx = torch.topk(probs, 2)
 
-                tile = image.crop((left, top, right, bottom))
-                input_t = transform(tile).unsqueeze(0).to(device)
-
-                outputs = model(input_t)
-                probs = torch.nn.functional.softmax(outputs, dim=1)
-                top2_prob, top2_idx = torch.topk(probs, 2)
-
-                best_class = CLASSES[top2_idx[0][0].item()]
-                best_conf = top2_prob[0][0].item()
-                second_class = CLASSES[top2_idx[0][1].item()]
+            for j in range(len(batch_tiles)):
+                r, c = positions[i + j]
+                best_class = CLASSES[top2_idx[j][0].item()]
+                best_conf = top2_prob[j][0].item()
+                second_class = CLASSES[top2_idx[j][1].item()]
 
                 if best_class in ['River', 'SeaLake'] and best_conf < 0.90:
                     terrain = second_class
