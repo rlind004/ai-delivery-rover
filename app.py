@@ -9,8 +9,9 @@ import heapq
 import os
 from torch.utils.data import DataLoader, random_split
 from torchvision import datasets
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import confusion_matrix, classification_report, accuracy_score
 import seaborn as sns
+import pandas as pd
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="AI Delivery Rover", layout="wide")
@@ -283,18 +284,31 @@ def evaluate_model(model):
         
         st.success(f"Evaluation Complete! Tested on {len(y_true)} images.")
         
-        # Plot Confusion Matrix
+        # 1. Calculate Metrics
+        acc = accuracy_score(y_true, y_pred)
+        report = classification_report(y_true, y_pred, target_names=CLASSES, output_dict=True)
+        
+        # 2. Confusion Matrix Plot
         cm = confusion_matrix(y_true, y_pred)
-        fig, ax = plt.subplots(figsize=(10, 8))
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=CLASSES, yticklabels=CLASSES, ax=ax)
-        plt.xlabel('Predicted Label')
-        plt.ylabel('True Label')
-        plt.title('Confusion Matrix')
-        return fig
+        fig_cm, ax_cm = plt.subplots(figsize=(10, 8))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=CLASSES, yticklabels=CLASSES, ax=ax_cm)
+        ax_cm.set_xlabel('Predicted Label')
+        ax_cm.set_ylabel('True Label')
+        ax_cm.set_title('Confusion Matrix')
+        
+        # 3. F1-Score Bar Chart
+        f1_scores = [report[cls]['f1-score'] for cls in CLASSES]
+        fig_f1, ax_f1 = plt.subplots(figsize=(10, 6))
+        sns.barplot(x=f1_scores, y=CLASSES, palette="viridis", ax=ax_f1)
+        ax_f1.set_xlabel("F1 Score")
+        ax_f1.set_title("Per-Class Performance (F1 Score)")
+        ax_f1.set_xlim(0, 1.0)
+        
+        return fig_cm, fig_f1, acc, report
         
     except Exception as e:
         st.error(f"Evaluation failed: {e}")
-        return None
+        return None, None, 0, None
 
 # --- MAIN LOGIC ---
 if run_btn:
@@ -371,7 +385,25 @@ if eval_btn:
         model = load_model(model_file)
         if model:
             st.markdown("---")
-            st.header("📊 Model Evaluation")
-            fig = evaluate_model(model)
-            if fig:
-                st.pyplot(fig)
+            st.header("📊 Model Evaluation & Metrics")
+            
+            fig_cm, fig_f1, acc, report = evaluate_model(model)
+            
+            if fig_cm:
+                # Display Top-Level Metrics
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Overall Accuracy", f"{acc*100:.2f}%")
+                c2.metric("Total Test Images", "5400 (Approx)") # 20% of EuroSAT
+                c3.metric("Model Status", "Ready")
+                
+                st.subheader("1. Where is the model making mistakes?")
+                st.pyplot(fig_cm)
+                
+                st.subheader("2. Class Performance (F1-Score)")
+                st.write("F1-Score attempts to find the balance between Precision (not categorizing blindly) and Recall (not missing real items).")
+                st.pyplot(fig_f1)
+                
+                st.subheader("3. Detailed Classification Report")
+                # Convert report to handy dataframe
+                df_report = pd.DataFrame(report).transpose()
+                st.dataframe(df_report.style.highlight_max(axis=0))
