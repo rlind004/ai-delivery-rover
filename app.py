@@ -7,6 +7,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import heapq
 import os
+from torch.utils.data import DataLoader, random_split
+from torchvision import datasets
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="AI Delivery Rover", layout="wide")
@@ -48,11 +52,19 @@ else:
 
 # 3. Pathfinding Parameters
 st.sidebar.subheader("3. Navigation")
-start_x = st.sidebar.number_input("Start X", min_value=0, value=2)
-start_y = st.sidebar.number_input("Start Y", min_value=0, value=2)
-# Goal will be set to bottom-right by default if left as 0,0 or handled in logic
+st.sidebar.markdown("**Start Position**")
+start_x = st.sidebar.number_input("Start X", min_value=0, value=2, key="sx")
+start_y = st.sidebar.number_input("Start Y", min_value=0, value=2, key="sy")
+
+st.sidebar.markdown("**Goal Position**")
+end_x = st.sidebar.number_input("Goal X", min_value=0, value=0, key="ex")
+end_y = st.sidebar.number_input("Goal Y", min_value=0, value=0, key="ey")
 
 run_btn = st.sidebar.button("🚀 Launch Rover")
+
+# 4. Evaluation
+st.sidebar.subheader("4. Model Evaluation")
+eval_btn = st.sidebar.button("📊 Evaluate Model")
 
 # --- MODEL DEFINITION ---
 class SatelliteCNN(nn.Module):
@@ -224,6 +236,66 @@ def a_star(costs, start, goal):
     path.reverse()
     return path
 
+# --- EVALUATION LOGIC ---
+def evaluate_model(model):
+    st.info("Downloading EuroSAT dataset for evaluation (this may take a moment)...")
+    data_path = './eurosat_data'
+    
+    # Use same transform as training
+    transform = transforms.Compose([
+        transforms.Resize((64, 64)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    
+    try:
+        # Download/Load
+        dataset = datasets.EuroSAT(root=data_path, download=True, transform=transform)
+        
+        # Split (Same seed/logic as training ideally, but random split is okay for generic eval)
+        train_size = int(0.8 * len(dataset))
+        val_size = len(dataset) - train_size
+        _, val_data = random_split(dataset, [train_size, val_size])
+        
+        val_loader = DataLoader(val_data, batch_size=32, shuffle=False)
+        
+        y_true = []
+        y_pred = []
+        
+        progress_bar = st.progress(0)
+        status = st.empty()
+        total_batches = len(val_loader)
+        
+        status.text("Running inference on validation set...")
+        with torch.no_grad():
+            for i, (images, labels) in enumerate(val_loader):
+                images = images.to(device)
+                outputs = model(images)
+                _, predicted = torch.max(outputs, 1)
+                
+                y_true.extend(labels.cpu().numpy())
+                y_pred.extend(predicted.cpu().numpy())
+                
+                progress_bar.progress(min((i + 1) / total_batches, 1.0))
+                
+        progress_bar.empty()
+        status.empty()
+        
+        st.success(f"Evaluation Complete! Tested on {len(y_true)} images.")
+        
+        # Plot Confusion Matrix
+        cm = confusion_matrix(y_true, y_pred)
+        fig, ax = plt.subplots(figsize=(10, 8))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=CLASSES, yticklabels=CLASSES, ax=ax)
+        plt.xlabel('Predicted Label')
+        plt.ylabel('True Label')
+        plt.title('Confusion Matrix')
+        return fig
+        
+    except Exception as e:
+        st.error(f"Evaluation failed: {e}")
+        return None
+
 # --- MAIN LOGIC ---
 if run_btn:
     if not model_file:
@@ -237,16 +309,20 @@ if run_btn:
             
             st.success("Map Scanned Successfully!")
             
-            # Determine End Coordinate (default to bottom-right if not set logic, but user inputs manual)
-            # Input was x,y. In grid, r=y, c=x.
-            # Start: (start_y, start_x), End: (rows-1, cols-1) if user default?
-            
-            # Let's use the sidebar inputs
+            # Determine Coordinates
             start_coord = (int(start_y), int(start_x))
-            # Just default goal to bottom right for now, or add input (leaving simple)
-            goal_coord = (rows-1, cols-1)
             
-            path = a_star(costs, start_coord, goal_coord)
+            if end_x == 0 and end_y == 0:
+                goal_coord = (rows-1, cols-1)
+                st.toast(f"Goal defaulting to bottom-right: {goal_coord}")
+            else:
+                goal_coord = (int(end_y), int(end_x))
+            
+            if not (0 <= goal_coord[0] < rows and 0 <= goal_coord[1] < cols):
+                st.error(f"Goal coordinate {goal_coord} is out of bounds (Max: {rows-1}, {cols-1}).")
+                path = None
+            else:
+                path = a_star(costs, start_coord, goal_coord)
             
             # Visualization
             col1, col2 = st.columns(2)
@@ -287,3 +363,15 @@ if run_btn:
                 st.info(f"Path found with length: {len(path)} steps.")
             else:
                 st.warning("No path found to the destination.")
+
+if eval_btn:
+    if not model_file:
+         st.error("Please select or upload a model file (Section 1) first.")
+    else:
+        model = load_model(model_file)
+        if model:
+            st.markdown("---")
+            st.header("📊 Model Evaluation")
+            fig = evaluate_model(model)
+            if fig:
+                st.pyplot(fig)
